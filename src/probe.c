@@ -11,6 +11,7 @@
 #include "orb_hook.h"
 #include "cheat_hook.h"
 #include "qte_hook.h"
+#include "switch_hook.h"
 #include "actor_hook.h"
 #include "damage_hook.h"
 #include "menu_hook.h"
@@ -379,6 +380,8 @@ extern uintptr_t gow3_damage_multiplier(int taken);
 extern uintptr_t gow3_orb_pickup_multiplier(unsigned kind);
 extern void gow3_stat_multipliers_status(int damage, int orb_pickup);
 extern uintptr_t gow3_qte_state_address(void);
+extern uintptr_t gow3_switch_state_address(void);
+extern void gow3_switch_status(int supported);
 
 /* The hooks below find their sites by signature (src/signature.h), so they work in any region
  * and version of the game whose code matches; a site that is not found leaves its feature off. */
@@ -530,6 +533,60 @@ static void install_qte_hooks(Segment *segments, uint64_t count, uint64_t size) 
     }
     state->block = (uint64_t)(uintptr_t)(image + block);
     printf("Stick prompts: rotation prompt hooks ready\n");
+}
+
+/* Switch attacks (src/switch_hook.h): which input takes the branches to Kratos' switch attacks.
+ * Installed only with GOW3_SWITCH_ATTACKS=1; all three or none. */
+static void install_switch_hooks(Segment *segments, uint64_t count, uint64_t size) {
+    const char *setting = getenv("GOW3_SWITCH_ATTACKS");
+    if (!setting || strcmp(setting, "1")) return;
+    const uint64_t sites[3] = {gow3_signature_find(image, size, &gow3_switch_weapon_site),
+                               gow3_signature_find(image, size, &gow3_switch_button_site),
+                               gow3_signature_find(image, size, &gow3_switch_select_site)};
+    const unsigned char *originals[3] = {gow3_switch_weapon_original, gow3_switch_button_original,
+                                         gow3_switch_select_original};
+    const unsigned lengths[3] = {GOW3_SWITCH_WEAPON_HOOK_LENGTH, GOW3_SWITCH_BUTTON_HOOK_LENGTH,
+                                 GOW3_SWITCH_SELECT_HOOK_LENGTH};
+    for (unsigned i = 0; i < 3; ++i) {
+        if (sites[i] == UINT64_MAX || !mapped(segments, count, sites[i], lengths[i]) ||
+            memcmp(image + sites[i], originals[i], lengths[i])) {
+            printf("Switch attacks: unavailable (code not found in this eboot.bin)\n");
+            return;
+        }
+    }
+    const uint64_t out = sites[1] + GOW3_SWITCH_BUTTON_OUT;
+    if (!mapped(segments, count, out, sizeof(gow3_switch_button_out)) ||
+        memcmp(image + out, gow3_switch_button_out, sizeof(gow3_switch_button_out))) {
+        printf("Switch attacks: unavailable (code not found in this eboot.bin)\n");
+        return;
+    }
+    unsigned char *stubs = allocate(page_size);
+    int32_t relative[3];
+    for (unsigned i = 0; i < 3; ++i) {
+        const int64_t delta = (int64_t)(uintptr_t)(stubs + i * 256) - (int64_t)(uintptr_t)(image + sites[i] + 5);
+        if (delta < INT32_MIN || delta > INT32_MAX) {
+            printf("Switch attacks: unavailable (hook outside relative-jump range)\n");
+            return;
+        }
+        relative[i] = (int32_t)delta;
+    }
+    const uintptr_t state = gow3_switch_state_address();
+    const uintptr_t targets[4] = {(uintptr_t)(image + sites[1] + GOW3_SWITCH_BUTTON_SAME),
+                                  (uintptr_t)(image + sites[1] + GOW3_SWITCH_BUTTON_OTHER),
+                                  (uintptr_t)(image + sites[1] + GOW3_SWITCH_BUTTON_HELD),
+                                  (uintptr_t)(image + out)};
+    gow3_switch_build_weapon_stub(stubs, state, (uintptr_t)(image + sites[0] + lengths[0]));
+    gow3_switch_build_button_stub(stubs + 256, state, targets);
+    gow3_switch_build_select_stub(stubs + 512, state, (uintptr_t)(image + sites[2] + lengths[2]));
+    protect(stubs, page_size, 5);
+    for (unsigned i = 0; i < 3; ++i) {
+        image[sites[i]] = 0xe9;
+        memcpy(image + sites[i] + 1, &relative[i], 4);
+        memset(image + sites[i] + 5, 0x90, lengths[i] - 5);
+    }
+    gow3_switch_status(1);
+    printf("Switch attacks: hooks ready (weapon check 0x%llx, button test 0x%llx, select 0x%llx)\n",
+           (unsigned long long)sites[0], (unsigned long long)sites[1], (unsigned long long)sites[2]);
 }
 
 static void install_orb_multiplier(Segment *segments, uint64_t count, uint64_t size) {
@@ -1021,6 +1078,7 @@ int main(int argc, char **argv) {
     if (gpu_enabled) install_actor_watch(segments, ns, size);
     if (gpu_enabled) install_stat_multipliers(segments, ns, size);
     if (gpu_enabled) install_qte_hooks(segments, ns, size);
+    if (gpu_enabled) install_switch_hooks(segments, ns, size);
     if (gpu_enabled && pause_menu && app0) install_menu_exit(segments, ns, size, pause_menu);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));

@@ -47,7 +47,51 @@ static int touch_at(const PadData *d, int x) {
 }
 static void pump(void) { SDL_UpdateJoysticks(); SDL_UpdateGamepads(); }
 
+/* Switch attacks: L1 + d-pad goes to the game as it is and leaves a request for the hooks a moment
+ * later; it ends when a hook takes it or lapses. Nothing while the move system is not asking. */
+static void test_switch_attack(void) {
+    setenv("GOW3_SWITCH_ATTACKS","1",1);
+    gow3_switch_status(1);
+    const uint64_t t0=10000000;
+    PadData d={0};
+    gow3_switch.heartbeat=1;
+    d.timestamp=t0-10000; d.buttons=BTN_L1; apply_switch_attack(&d);  /* playing, L1 held */
+    assert(!gow3_switch.pending && !sw.phase);
+    d.timestamp=t0; d.buttons=BTN_L1|BTN_DOWN; apply_switch_attack(&d);
+    assert(d.buttons==(BTN_L1|BTN_DOWN) && !gow3_switch.pending && sw.phase==1);  /* the game's as it is */
+    d.timestamp=t0+10000; apply_switch_attack(&d);
+    assert(!gow3_switch.pending);
+    d.timestamp=t0+25000; apply_switch_attack(&d);
+    assert(gow3_switch.pending && sw.phase==2);                        /* the request */
+    gow3_switch.pending=0; ++gow3_switch.granted;                      /* a switch branch took it */
+    d.timestamp=t0+40000; apply_switch_attack(&d);
+    assert(!sw.phase);
+    /* Without L1 no request; a request no move can take lapses. */
+    d.timestamp=t0+100000; d.buttons=0; apply_switch_attack(&d);
+    d.timestamp=t0+120000; d.buttons=BTN_LEFT; apply_switch_attack(&d);
+    assert(!sw.phase);
+    d.timestamp=t0+140000; d.buttons=BTN_L1; apply_switch_attack(&d);
+    d.timestamp=t0+160000; d.buttons=BTN_L1|BTN_RIGHT; apply_switch_attack(&d);
+    d.timestamp=t0+190000; apply_switch_attack(&d);
+    assert(gow3_switch.pending);
+    d.timestamp=t0+470000; apply_switch_attack(&d);
+    assert(!gow3_switch.pending && !sw.phase);
+    /* The move system silent for a second (a menu): no request. */
+    d.timestamp=t0+3000000; d.buttons=BTN_L1; apply_switch_attack(&d);
+    d.timestamp=t0+3100000; d.buttons=BTN_L1|BTN_UP; apply_switch_attack(&d);
+    assert(!sw.phase);
+    gow3_switch.heartbeat=2;
+    d.timestamp=t0+3200000; d.buttons=BTN_L1; apply_switch_attack(&d);
+    d.timestamp=t0+3300000; d.buttons=BTN_L1|BTN_UP; apply_switch_attack(&d);
+    assert(sw.phase==1);
+    reset_switch_attack();
+    assert(!gow3_switch.pending && !sw.phase);
+    setenv("GOW3_SWITCH_ATTACKS","0",1);
+    sw.loaded=0;
+}
+
 int main(void) {
+    test_switch_attack();
     const char *tmp=getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
     char path[1024];
     snprintf(path,sizeof(path),"%s/gow3-pad-test-XXXXXX",tmp);
@@ -242,5 +286,5 @@ int main(void) {
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, staged left/right clicks, L1 chord, engine frame rate combo, SDL touch coordinates, overlay capture");
+    puts("PASS: pad ABI, staged left/right clicks, L1 chord, engine frame rate combo, SDL touch coordinates, overlay capture, switch attacks");
 }

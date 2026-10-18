@@ -257,6 +257,11 @@ En un control sin touchpad (Xbox y otros), View abre el menú de pausa (el clic 
 y L1 + View abre el modo foto (el clic izquierdo). En un DualSense el touchpad funciona como en la
 PS4, y Share/Create funciona como View.
 
+**Ataques de cambio con L1 + cruceta y L1 + Cruz** (desactivado por defecto, página Controls): L1 +
+una dirección de la cruceta cambia a esa arma con su ataque de cambio, y el arma que Kratos ya tiene en
+la mano repite su ataque; L1 + Cruz hace el ataque de cambio del arma en la mano en lugar de pasar a la
+siguiente arma. La cruceta sola cambia como antes. Sin el launcher, definí `GOW3_SWITCH_ATTACKS=1`.
+
 Los **íconos de botones en el juego** (desactivados por defecto) se eligen en la página Controls del launcher, en
 *In-game button icons*: *Match my controller*, *Xbox*, *Nintendo* o *Keyboard*. Reemplazan los íconos de
 PlayStation en los tutoriales, la lista de movimientos y las indicaciones de quick-time events; el

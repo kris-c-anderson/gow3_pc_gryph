@@ -12,6 +12,7 @@
 #include "runtime.h"
 #include "gpu/gow3gpu.h"
 #include "qte_hook.h"
+#include "switch_hook.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -694,6 +695,62 @@ static void apply_dodge(PadData *d) {
     if (held || d->timestamp<dodge.until) { d->right_x=dodge.x; d->right_y=dodge.y; }
 }
 
+/* Switch attacks (GOW3_SWITCH_ATTACKS=1, src/switch_hook.h). The pad presses nothing for the
+ * player: L1 + a d-pad direction goes to the game as it is (the game selects that weapon), and
+ * the pad only leaves a request for the hooks, which let the next switch branch to the selected
+ * weapon be taken. The request waits SWITCH_DELAY_US so the game has selected the weapon, and
+ * lapses after SWITCH_REQUEST_US if no move can switch (the switch attack itself ends it). Only
+ * while the move system is asking (heartbeat): not in the game's menus. */
+enum { SWITCH_DELAY_US=20000, SWITCH_REQUEST_US=300000, SWITCH_PLAYING_US=1000000,
+       DPAD=BTN_UP|BTN_RIGHT|BTN_DOWN|BTN_LEFT };
+static Gow3SwitchState gow3_switch;
+static struct {
+    int loaded, enabled, hooks, phase;  /* phase: 0 idle, 1 waiting to request, 2 requested */
+    uint32_t previous, heartbeat, granted;
+    uint64_t start, playing;
+} sw;
+uintptr_t gow3_switch_state_address(void) { return (uintptr_t)&gow3_switch; }
+void gow3_switch_status(int supported) { sw.hooks=supported; }
+
+static void reset_switch_attack(void) {
+    if (sw.phase) __atomic_store_n(&gow3_switch.pending,0,__ATOMIC_RELEASE);
+    sw.phase=0;
+}
+static void apply_switch_attack(const PadData *d) {
+    if (!sw.loaded) {
+        sw.loaded=1;
+        const char *value=getenv("GOW3_SWITCH_ATTACKS");
+        sw.enabled=value && !strcmp(value,"1");
+        if (sw.enabled) printf("Runtime: switch attacks on L1 + d-pad and L1 + Cross%s\n",
+                               sw.hooks ? "" : " unavailable (hooks not installed)");
+    }
+    if (!sw.enabled || !sw.hooks) return;
+    const uint32_t dpad=d->buttons & DPAD, pressed=dpad & ~sw.previous;
+    sw.previous=dpad;
+    const uint32_t beat=__atomic_load_n(&gow3_switch.heartbeat,__ATOMIC_RELAXED);
+    if (beat!=sw.heartbeat) { sw.heartbeat=beat; sw.playing=d->timestamp; }
+    if (pressed && (d->buttons & BTN_L1) && d->timestamp-sw.playing<SWITCH_PLAYING_US) {
+        if (sw.phase==2) __atomic_store_n(&gow3_switch.pending,0,__ATOMIC_RELEASE);  /* a newer one */
+        sw.phase=1;
+        sw.start=d->timestamp;
+        sw.granted=__atomic_load_n(&gow3_switch.granted,__ATOMIC_RELAXED);
+    }
+    if (!sw.phase) return;
+    const uint64_t t=d->timestamp-sw.start;
+    if (sw.phase==1 && t>=SWITCH_DELAY_US) {
+        __atomic_store_n(&gow3_switch.pending,1,__ATOMIC_RELEASE);
+        sw.phase=2;
+    }
+    if (sw.phase==2 && (t>=SWITCH_REQUEST_US || !__atomic_load_n(&gow3_switch.pending,__ATOMIC_ACQUIRE))) {
+        __atomic_store_n(&gow3_switch.pending,0,__ATOMIC_RELEASE);
+        const uint32_t granted=__atomic_load_n(&gow3_switch.granted,__ATOMIC_RELAXED)-sw.granted;
+        printf("Runtime: switch attack request %s after %u ms (weapon in hand 0x%x)\n",
+               granted ? "taken" : t>=SWITCH_REQUEST_US ? "lapsed" : "ended by a switch attack",
+               (unsigned)(t/1000),__atomic_load_n(&gow3_switch.weapon,__ATOMIC_RELAXED));
+        sw.phase=0;
+    }
+}
+
 /* R3 + L1 + R1 goes through the engine frame rates live (60 for spots that break at a higher
  * rate). The three stay hidden from the game until each one is released: a stray R1 grabs. */
 enum { ENGINE_FPS_COMBO=BTN_R3|BTN_L1|BTN_R1 };
@@ -714,7 +771,9 @@ static void engine_fps_combo(PadData *d) {
 static int hold_after_capture;
 static void sample(PadData *d) {
     sample_host(d);
-    if (gow3gpu_overlay_captures_input()) { hold_after_capture=1; click.side=-1; reset_dodge(); return; }
+    if (gow3gpu_overlay_captures_input()) {
+        hold_after_capture=1; click.side=-1; reset_dodge(); reset_switch_attack(); return;
+    }
     record_sample(d); /* the click sources as they are: a replay plays them again */
     read_inject();
     replay_sample(d);
@@ -724,6 +783,7 @@ static void sample(PadData *d) {
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
     apply_combos(d);
+    apply_switch_attack(d);
     apply_dodge(d);
     apply_mouse_aim(d);
     note_pause_key(d);

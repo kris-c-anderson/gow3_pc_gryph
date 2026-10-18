@@ -258,6 +258,11 @@ On a controller without a touchpad (Xbox and others), View opens the pause menu 
 touchpad click) and L1 + View opens photo mode (the left click). On a DualSense the touchpad
 works as on the PS4, and Share/Create works like View.
 
+**Switch attacks on L1 + d-pad and L1 + Cross** (off by default, Controls page): L1 + a d-pad
+direction switches to that weapon with its switch attack, and the weapon in Kratos' hands does its
+attack again; L1 + Cross does the switch attack of the weapon in his hands instead of cycling to the
+next weapon. The d-pad alone switches as before. Without the launcher, set `GOW3_SWITCH_ATTACKS=1`.
+
 **In-game button icons** (off by default) are chosen on the launcher's Controls page, under
 *In-game button icons*: *Match my controller*, *Xbox*, *Nintendo* or *Keyboard*. They replace the PlayStation icons in the
 tutorial, move-list and quick-time prompts; the pause-menu controller drawing stays a DualShock 4.
