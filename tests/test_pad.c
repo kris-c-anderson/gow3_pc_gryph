@@ -49,43 +49,37 @@ static void pump(void) { SDL_UpdateJoysticks(); SDL_UpdateGamepads(); }
 
 /* Switch attacks: L1 + d-pad goes to the game as it is and leaves a request for the hooks a moment
  * later; it ends when a hook takes it or lapses. Nothing while the move system is not asking. */
+static void switch_put(uint8_t kind, uint64_t branch, uint64_t result) {
+    const uint32_t i=gow3_switch.head++;
+    Gow3SwitchRecord *r=&gow3_switch.records[i & (GOW3_SWITCH_RING-1)];
+    memset(r,0,sizeof(*r));
+    r->kind=kind; r->q[0]=branch; r->q[1]=result;
+    ((uint8_t *)&r->q[kind==GOW3_SWITCH_CHECK ? 7 : 8])[0x2f]=0x12;
+    r->seq=i+1;
+}
+/* The diagnostic: the pad's buttons as they change, each record once until it changes. */
 static void test_switch_attack(void) {
     setenv("GOW3_SWITCH_ATTACKS","1",1);
     gow3_switch_status(1);
-    const uint64_t t0=10000000;
     PadData d={0};
-    gow3_switch.heartbeat=1;
-    d.timestamp=t0-10000; d.buttons=BTN_L1; apply_switch_attack(&d);  /* playing, L1 held */
-    assert(!gow3_switch.pending && !sw.phase);
-    d.timestamp=t0; d.buttons=BTN_L1|BTN_DOWN; apply_switch_attack(&d);
-    assert(d.buttons==(BTN_L1|BTN_DOWN) && !gow3_switch.pending && sw.phase==1);  /* the game's as it is */
-    d.timestamp=t0+10000; apply_switch_attack(&d);
-    assert(!gow3_switch.pending);
-    d.timestamp=t0+25000; apply_switch_attack(&d);
-    assert(gow3_switch.pending && sw.phase==2);                        /* the request */
-    gow3_switch.pending=0; ++gow3_switch.granted;                      /* a switch branch took it */
-    d.timestamp=t0+40000; apply_switch_attack(&d);
-    assert(!sw.phase);
-    /* Without L1 no request; a request no move can take lapses. */
-    d.timestamp=t0+100000; d.buttons=0; apply_switch_attack(&d);
-    d.timestamp=t0+120000; d.buttons=BTN_LEFT; apply_switch_attack(&d);
-    assert(!sw.phase);
-    d.timestamp=t0+140000; d.buttons=BTN_L1; apply_switch_attack(&d);
-    d.timestamp=t0+160000; d.buttons=BTN_L1|BTN_RIGHT; apply_switch_attack(&d);
-    d.timestamp=t0+190000; apply_switch_attack(&d);
-    assert(gow3_switch.pending);
-    d.timestamp=t0+470000; apply_switch_attack(&d);
-    assert(!gow3_switch.pending && !sw.phase);
-    /* The move system silent for a second (a menu): no request. */
-    d.timestamp=t0+3000000; d.buttons=BTN_L1; apply_switch_attack(&d);
-    d.timestamp=t0+3100000; d.buttons=BTN_L1|BTN_UP; apply_switch_attack(&d);
-    assert(!sw.phase);
-    gow3_switch.heartbeat=2;
-    d.timestamp=t0+3200000; d.buttons=BTN_L1; apply_switch_attack(&d);
-    d.timestamp=t0+3300000; d.buttons=BTN_L1|BTN_UP; apply_switch_attack(&d);
-    assert(sw.phase==1);
-    reset_switch_attack();
-    assert(!gow3_switch.pending && !sw.phase);
+    d.timestamp=1000000;
+    apply_switch_attack(&d);
+    assert(sw.enabled && sw.lines==0);
+    d.buttons=BTN_L1; d.timestamp+=16000; apply_switch_attack(&d);
+    assert(sw.lines==1);
+    switch_put(GOW3_SWITCH_CHECK,0x1000,1);
+    switch_put(GOW3_SWITCH_CHECK,0x1000,1);
+    switch_put(GOW3_SWITCH_EVAL,0x1000,0xffffffffull<<0);
+    d.timestamp+=16000; apply_switch_attack(&d);
+    assert(sw.lines==3 && sw.tail==3);
+    switch_put(GOW3_SWITCH_CHECK,0x1000,0);   /* changed */
+    gow3_switch.records[(gow3_switch.head) & (GOW3_SWITCH_RING-1)].seq=0;
+    ++gow3_switch.head;                        /* claimed, not written yet */
+    d.timestamp+=16000; apply_switch_attack(&d);
+    assert(sw.lines==4 && sw.tail==4);
+    gow3_switch.records[4].seq=5; gow3_switch.records[4].kind=GOW3_SWITCH_SELECT;
+    d.timestamp+=16000; apply_switch_attack(&d);
+    assert(sw.lines==5 && sw.tail==5);
     setenv("GOW3_SWITCH_ATTACKS","0",1);
     sw.loaded=0;
 }

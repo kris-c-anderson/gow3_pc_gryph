@@ -695,60 +695,146 @@ static void apply_dodge(PadData *d) {
     if (held || d->timestamp<dodge.until) { d->right_x=dodge.x; d->right_y=dodge.y; }
 }
 
-/* Switch attacks (GOW3_SWITCH_ATTACKS=1, src/switch_hook.h). The pad presses nothing for the
- * player: L1 + a d-pad direction goes to the game as it is (the game selects that weapon), and
- * the pad only leaves a request for the hooks, which let the next switch branch to the selected
- * weapon be taken. The request waits SWITCH_DELAY_US so the game has selected the weapon, and
- * lapses after SWITCH_REQUEST_US if no move can switch (the switch attack itself ends it). Only
- * while the move system is asking (heartbeat): not in the game's menus. */
-enum { SWITCH_DELAY_US=20000, SWITCH_REQUEST_US=300000, SWITCH_PLAYING_US=1000000,
-       DPAD=BTN_UP|BTN_RIGHT|BTN_DOWN|BTN_LEFT };
+/* Switch attacks, diagnostic build (GOW3_SWITCH_ATTACKS=1, src/switch_hook.h): the game plays as
+ * it is; the pad writes the hooks' records to the log, with L1, Cross, Square, Triangle, Circle
+ * and the d-pad as they change. Repeats are left out: a branch is written again only when what
+ * the game made of it changed, or a quarter of a second later for a pressed button. */
+enum { SWITCH_LOG_LINES=12000, SWITCH_SEEN=2048, SWITCH_REPEAT_US=250000,
+       SWITCH_BUTTONS=BTN_L1|BTN_CROSS|BTN_SQUARE|BTN_TRIANGLE|BTN_CIRCLE|BTN_UP|BTN_RIGHT|BTN_DOWN|BTN_LEFT };
 static Gow3SwitchState gow3_switch;
+typedef struct { uint64_t key, sig, at; } SwitchSeen;
 static struct {
-    int loaded, enabled, hooks, phase;  /* phase: 0 idle, 1 waiting to request, 2 requested */
-    uint32_t previous, heartbeat, granted;
-    uint64_t start, playing;
+    int loaded, enabled, hooks;
+    uint32_t tail, previous, lines;
+    uint64_t start;
+    SwitchSeen seen[SWITCH_SEEN];
 } sw;
 uintptr_t gow3_switch_state_address(void) { return (uintptr_t)&gow3_switch; }
 void gow3_switch_status(int supported) { sw.hooks=supported; }
+static void reset_switch_attack(void) {}
 
-static void reset_switch_attack(void) {
-    if (sw.phase) __atomic_store_n(&gow3_switch.pending,0,__ATOMIC_RELEASE);
-    sw.phase=0;
+static const char *switch_weapon(unsigned w) {
+    static const char *names[4]={"Cestus","Whip","Blades","Claws"};
+    return w>=0x10 && w<=0x13 ? names[w-0x10] : "-";
+}
+static uint32_t switch_u32(const uint8_t *raw, unsigned at) { uint32_t v; memcpy(&v,raw+at,4); return v; }
+static int16_t switch_i16(const uint8_t *raw, unsigned at) { int16_t v; memcpy(&v,raw+at,2); return v; }
+static uint16_t switch_u16(const uint8_t *raw, unsigned at) { uint16_t v; memcpy(&v,raw+at,2); return v; }
+static unsigned long long switch_code(uint64_t address) {
+    return (unsigned long long)(address-gow3_switch.image);
+}
+/* 1 when the record is worth a line: new, changed, or (repeat) old enough. */
+static int switch_fresh(uint64_t key, uint64_t sig, uint64_t now, int repeat, int *first) {
+    uint64_t h=key*0x9e3779b97f4a7c15ull;
+    for (unsigned i=0;i<SWITCH_SEEN;++i) {
+        SwitchSeen *s=&sw.seen[((h>>53)+i) & (SWITCH_SEEN-1)];
+        if (!s->key) { s->key=key; s->sig=sig; s->at=now; *first=1; return 1; }
+        if (s->key!=key) continue;
+        *first=0;
+        if (s->sig==sig && !(repeat && now-s->at>=SWITCH_REPEAT_US)) return 0;
+        s->sig=sig; s->at=now;
+        return 1;
+    }
+    *first=0;
+    return 1;
+}
+/* What a branch says: where it goes, its button, held-buttons mask, weapon flags. */
+static void switch_branch(uint64_t branch, const uint8_t *raw, int first) {
+    const int32_t rel=(int32_t)switch_u32(raw,4);
+    printf(" | branch %llx to %s(0x%02x) move %llx btn %d held-mask 0x%04x weapon-flags 0x%04x +8 %08x +2a %d lvl %d..%d",
+           (unsigned long long)branch,switch_weapon(raw[0x2f]),raw[0x2f],
+           rel ? (unsigned long long)(branch+4+(int64_t)rel) : 0ull,switch_i16(raw,0x2c),switch_u16(raw,0x12),
+           switch_u16(raw,0x10),switch_u32(raw,8),switch_i16(raw,0x2a),(int8_t)raw[0x33],(int8_t)raw[0x34]);
+    if (first) {
+        printf(" raw");
+        for (unsigned i=0;i<56;++i) printf("%s%02x",i%4 ? "" : " ",raw[i]);
+    }
+}
+static void switch_record(const Gow3SwitchRecord *r, uint64_t now) {
+    const uint64_t *q=r->q;
+    const unsigned ms=(unsigned)((now-sw.start)/1000);
+    int first=0;
+    switch (r->kind) {
+    case GOW3_SWITCH_EVAL: {
+        const uint8_t *raw=(const uint8_t *)&q[8];
+        const int32_t pressed=(int32_t)q[2];
+        const uint64_t sig=q[1] ^ q[2]<<1 ^ q[3]<<7 ^ q[7]<<13;
+        if (!switch_fresh(q[0]<<3|1,sig,now,pressed!=-1,&first)) return;
+        printf("[%6u] test result %u out 0x%x pressed %d arg20 %d arg28 %d held 0x%x filter %llx move-now %llx from +%llx",
+               ms,(unsigned)(uint32_t)q[1],(unsigned)(q[1]>>32),pressed,(int)(int32_t)(q[2]>>32),(int)(int32_t)q[3],
+               (unsigned)(q[3]>>32),(unsigned long long)q[4],(unsigned long long)q[7],switch_code(q[6]));
+        switch_branch(q[0],raw,first);
+        break;
+    }
+    case GOW3_SWITCH_CHECK: {
+        const uint8_t *raw=(const uint8_t *)&q[7];
+        const uint64_t sig=q[1] ^ (q[3]&0x2e0000000ull)<<3 ^ (q[4]>>16&0xffff)<<40;
+        if (!switch_fresh(q[0]<<3|2,sig,now,0,&first)) return;
+        printf("[%6u] weapon check %u for %s(0x%02x) stats %llx +168 %016llx sel %s hand %s from +%llx",
+               ms,(unsigned)(uint32_t)q[1],switch_weapon((unsigned)(q[1]>>32)),(unsigned)(q[1]>>32),
+               (unsigned long long)q[2],(unsigned long long)q[3],switch_weapon((unsigned)(q[4]>>16&0xff)),
+               switch_weapon((unsigned)(q[4]>>24&0xff)),switch_code(q[6]));
+        switch_branch(q[0],raw,first);
+        break;
+    }
+    case GOW3_SWITCH_QUEUE: {
+        const uint8_t *raw=(const uint8_t *)&q[6];
+        float when; uint32_t bits=(uint32_t)q[2]; memcpy(&when,&bits,4);
+        if (!switch_fresh(q[1]<<3|3,0,now,1,&first)) return;
+        printf("[%6u] queued state %llx move-now %llx time %.3f slots %016llx from +%llx",ms,(unsigned long long)q[0],
+               (unsigned long long)q[4],(double)when,(unsigned long long)q[5],switch_code(q[3]));
+        switch_branch(q[1],raw,first);
+        break;
+    }
+    default: {
+        static const char *what[]={"","","","","d-pad handler","weapon applied","select (SCR_EnableWeapon)"};
+        if (r->kind<GOW3_SWITCH_DPAD || r->kind>GOW3_SWITCH_SELECT) return;
+        printf("[%6u] %s stats %llx rsi %llx rdx %llx rcx %llx +168 %016llx sel %s hand %s owned %08x from +%llx",
+               ms,what[r->kind],(unsigned long long)q[0],(unsigned long long)q[1],(unsigned long long)q[2],
+               (unsigned long long)q[3],(unsigned long long)q[5],switch_weapon((unsigned)(q[6]>>16&0xff)),
+               switch_weapon((unsigned)(q[6]>>24&0xff)),(unsigned)(q[7]>>32),switch_code(q[4]));
+    }
+    }
+    printf("\n");
+    ++sw.lines;
 }
 static void apply_switch_attack(const PadData *d) {
     if (!sw.loaded) {
         sw.loaded=1;
         const char *value=getenv("GOW3_SWITCH_ATTACKS");
         sw.enabled=value && !strcmp(value,"1");
-        if (sw.enabled) printf("Runtime: switch attacks on L1 + d-pad and L1 + Cross%s\n",
-                               sw.hooks ? "" : " unavailable (hooks not installed)");
-    }
-    if (!sw.enabled || !sw.hooks) return;
-    const uint32_t dpad=d->buttons & DPAD, pressed=dpad & ~sw.previous;
-    sw.previous=dpad;
-    const uint32_t beat=__atomic_load_n(&gow3_switch.heartbeat,__ATOMIC_RELAXED);
-    if (beat!=sw.heartbeat) { sw.heartbeat=beat; sw.playing=d->timestamp; }
-    if (pressed && (d->buttons & BTN_L1) && d->timestamp-sw.playing<SWITCH_PLAYING_US) {
-        if (sw.phase==2) __atomic_store_n(&gow3_switch.pending,0,__ATOMIC_RELEASE);  /* a newer one */
-        sw.phase=1;
         sw.start=d->timestamp;
-        sw.granted=__atomic_load_n(&gow3_switch.granted,__ATOMIC_RELAXED);
+        if (sw.enabled) printf("Runtime: switch attack diagnostic%s\n",
+                               sw.hooks ? " recording (the game plays as it is)" : " unavailable (hooks not installed)");
     }
-    if (!sw.phase) return;
-    const uint64_t t=d->timestamp-sw.start;
-    if (sw.phase==1 && t>=SWITCH_DELAY_US) {
-        __atomic_store_n(&gow3_switch.pending,1,__ATOMIC_RELEASE);
-        sw.phase=2;
+    if (!sw.enabled || !sw.hooks || sw.lines>=SWITCH_LOG_LINES) return;
+    const uint32_t buttons=d->buttons & SWITCH_BUTTONS;
+    if (buttons!=sw.previous) {
+        static const struct { uint32_t bit; const char *name; } names[]={
+            {BTN_L1,"L1"},{BTN_CROSS,"Cross"},{BTN_SQUARE,"Square"},{BTN_TRIANGLE,"Triangle"},{BTN_CIRCLE,"Circle"},
+            {BTN_UP,"Up"},{BTN_RIGHT,"Right"},{BTN_DOWN,"Down"},{BTN_LEFT,"Left"}};
+        printf("[%6u] pad:",(unsigned)((d->timestamp-sw.start)/1000));
+        for (unsigned i=0;i<sizeof(names)/sizeof(names[0]);++i) if (buttons & names[i].bit) printf(" %s",names[i].name);
+        printf("%s\n",buttons ? "" : " -");
+        sw.previous=buttons;
+        ++sw.lines;
     }
-    if (sw.phase==2 && (t>=SWITCH_REQUEST_US || !__atomic_load_n(&gow3_switch.pending,__ATOMIC_ACQUIRE))) {
-        __atomic_store_n(&gow3_switch.pending,0,__ATOMIC_RELEASE);
-        const uint32_t granted=__atomic_load_n(&gow3_switch.granted,__ATOMIC_RELAXED)-sw.granted;
-        printf("Runtime: switch attack request %s after %u ms (weapon in hand 0x%x)\n",
-               granted ? "taken" : t>=SWITCH_REQUEST_US ? "lapsed" : "ended by a switch attack",
-               (unsigned)(t/1000),__atomic_load_n(&gow3_switch.weapon,__ATOMIC_RELAXED));
-        sw.phase=0;
+    const uint32_t head=__atomic_load_n(&gow3_switch.head,__ATOMIC_ACQUIRE);
+    if (head-sw.tail>GOW3_SWITCH_RING) {
+        printf("Runtime: switch diagnostic dropped %u records\n",head-sw.tail-GOW3_SWITCH_RING);
+        sw.tail=head-GOW3_SWITCH_RING;
     }
+    while (sw.tail!=head && sw.lines<SWITCH_LOG_LINES) {
+        const Gow3SwitchRecord *slot=&gow3_switch.records[sw.tail & (GOW3_SWITCH_RING-1)];
+        const uint32_t seq=__atomic_load_n(&slot->seq,__ATOMIC_ACQUIRE);
+        if ((int32_t)(seq-(sw.tail+1))<0) break; /* still being written: next time */
+        Gow3SwitchRecord r;
+        memcpy(&r,slot,sizeof(r));
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (seq==sw.tail+1 && __atomic_load_n(&slot->seq,__ATOMIC_RELAXED)==seq) switch_record(&r,d->timestamp);
+        ++sw.tail;
+    }
+    if (sw.lines>=SWITCH_LOG_LINES) printf("Runtime: switch diagnostic stopped after %u lines\n",sw.lines);
 }
 
 /* R3 + L1 + R1 goes through the engine frame rates live (60 for spots that break at a higher
