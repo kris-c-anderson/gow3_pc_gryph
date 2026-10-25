@@ -1,37 +1,25 @@
 name: Rust launcher
 
+# Throwaway: renders the Controls page references on Windows and uploads them.
 on:
   push:
-    paths:
-      - 'launcher-rust/**'
-      - '.github/workflows/rust-launcher.yml'
-  pull_request:
-    paths:
-      - 'launcher-rust/**'
-      - '.github/workflows/rust-launcher.yml'
+    branches: [switch-attacks-snapshots]
+  workflow_dispatch:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        os: [windows-2025, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-2025
     defaults:
       run:
         working-directory: launcher-rust
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - name: Install Linux libraries
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo build --release
+      - run: cargo test --test ui_snapshots controls
+        continue-on-error: true
+      - run: cargo test --test ui_snapshots controls
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: spartanport-launcher-${{ matrix.os }}
-          path: launcher-rust/target/release/spartanport-launcher*
+          name: controls-snapshots
+          path: launcher-rust/snapshots/controls-*.png
