@@ -1,10 +1,13 @@
 name: Rust launcher
 
-# Throwaway: renders the Controls page references on Windows and uploads them.
+# Throwaway: renders the Controls page references on Windows and commits them to this branch.
 on:
   push:
     branches: [switch-attacks-snapshots]
-  workflow_dispatch:
+    paths: ['.github/workflows/rust-launcher.yml']
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -18,8 +21,10 @@ jobs:
       - run: cargo test --test ui_snapshots controls
         continue-on-error: true
       - run: cargo test --test ui_snapshots controls
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: controls-snapshots
-          path: launcher-rust/snapshots/controls-*.png
+      - shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add snapshots/controls-*.png
+          git commit -m "Rendered Controls snapshots"
+          git push
